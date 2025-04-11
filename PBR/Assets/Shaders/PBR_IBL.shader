@@ -1,4 +1,4 @@
-Shader "PBR_GI"{
+Shader "PBR_IBL"{
     Properties{
         _Color("Color", Color) = (1,1,1,1)                       // 颜色
         _MainTex("Albedo (RGB)", 2D) = "white" {}                // 反照率
@@ -19,7 +19,7 @@ Shader "PBR_GI"{
         #include "AutoLight.cginc"
 
     //间接光计算
-
+    
         // 顶点光照辅助函数，计算顶点级别的环境光或光照贴图uv信息
         // 参数：主uv（用于静态光照贴图）；动态光照贴图uv；顶点世界位置；顶点世界法线
         inline half4 VertexGI(float2 uv1, float2 uv2, float3 worldPos, float3 worldNormal){
@@ -32,6 +32,7 @@ Shader "PBR_GI"{
                 // 计算非重要的顶点光照
                 #ifdef VERTEXLIGHT_ON
                     // 计算4个顶点光照（UnityCG.cginc）
+                    // - 自动提供4个最重要的点光源信息
                     ambientOrLightmapUV.rgb = Shade4PointLights(
                         unity_4LightPosX0, unity_4LightPosY0, unity_4LightPosZ0,
                         unity_LightColor[0].rgb, unity_LightColor[1].rgb, unity_LightColor[2].rgb, unity_LightColor[3].rgb,
@@ -51,7 +52,7 @@ Shader "PBR_GI"{
 
         // 计算间接漫反射光照
         // 参数：环境光或光照贴图uv；环境光遮蔽
-        inline half3 ComputeIndirectDiffuse(half4 ambientOrLightmapUV, half occlusion){
+        inline half3 IndirectDiffuse(half4 ambientOrLightmapUV, half occlusion){
             half3 indirectDiffuse = 0;
 
             // SH球谐光照 模拟漫反射
@@ -59,12 +60,10 @@ Shader "PBR_GI"{
             #if UNITY_SHOULD_SAMPLE_SH
                 indirectDiffuse = ambientOrLightmapUV.rgb;
             #endif
-
             // 静态光照贴图（预烘焙）
             #ifdef LIGHTMAP_ON
                 indirectDiffuse = DecodeLightmap(UNITY_SAMPLE_TEX2D(unity_Lightmap,ambientOrLightmapUV.xy));
             #endif
-
             // 动态光照贴图（实时全局光照）
             #ifdef DYNAMICLIGHTMAP_ON
                 indirectDiffuse += DecodeRealtimeLightmap(UNITY_SAMPLE_TEX2D(unity_DynamicLightmap, ambientOrLightmapUV.zw));
@@ -77,9 +76,9 @@ Shader "PBR_GI"{
         // - 根据反射探针的盒子体积，对原始世界反射方向 worldRefDir 进行校正
         // - 默认cubemap反射贴图是无限远的，对于局部盒状区域会造成拉伸
         // 世界空间下的反射方向向量；当前像素/片元的世界位置；反射探针位置；反射盒子最小边界；反射盒子最大边界
-        inline half3 BoxProjectedDirection(half3 worldRefDir, float3 worldPos, float4 cubemapCenter, float4 boxMin, float4 boxMax){
+        inline half3 BoxProjection(half3 worldRefDir, float3 worldPos, float4 cubemapCenter, float4 boxMin, float4 boxMax){
             
-            //使下面的if语句产生分支，(HLSLSupport.cginc)
+            //使if语句产生分支(HLSLSupport.cginc)
             UNITY_BRANCH
             //如果反射探头开启了BoxProjection选项，cubemapCenter.w > 0
             if(cubemapCenter.w > 0.0){
@@ -118,16 +117,16 @@ Shader "PBR_GI"{
 
         // 间接高光反射
         // 参数：世界空间反射方向；当前像素/片元的世界位置；粗糙度；环境光遮蔽因子
-        inline half3 ComputeIndirectSpecular(half3 refDir, float3 worldPos, half roughness, half occlusion){
+        inline half3 IndirectSpecular(half3 refDir, float3 worldPos, half roughness, half occlusion){
             half3 specular = 0;
             // 对第一个反射探针进行Box Projection方向修正
-            half3 refDir1 = BoxProjectedDirection(refDir, worldPos, unity_SpecCube0_ProbePosition, unity_SpecCube0_BoxMin, unity_SpecCube0_BoxMax);
+            half3 refDir1 = BoxProjection(refDir, worldPos, unity_SpecCube0_ProbePosition, unity_SpecCube0_BoxMin, unity_SpecCube0_BoxMax);
             half3 ref1 = SamplerReflectProbe(UNITY_PASS_TEXCUBE(unity_SpecCube0), refDir1, roughness, unity_SpecCube0_HDR);
 
             // 反射探针的空间边界：需要混合两个探针
             UNITY_BRANCH
             if(unity_SpecCube1_BoxMin.w < 0.99999){
-                half3 refDir2 = BoxProjectedDirection(refDir, worldPos, unity_SpecCube1_ProbePosition, unity_SpecCube1_BoxMin, unity_SpecCube1_BoxMax);
+                half3 refDir2 = BoxProjection(refDir, worldPos, unity_SpecCube1_ProbePosition, unity_SpecCube1_BoxMin, unity_SpecCube1_BoxMax);
                 half3 ref2 = SamplerReflectProbe(UNITY_PASS_TEXCUBE_SAMPLER(unity_SpecCube1, unity_SpecCube0), refDir2, roughness, unity_SpecCube1_HDR);
                 specular = lerp(ref2, ref1, unity_SpecCube0_BoxMin.w);
             }
@@ -301,16 +300,16 @@ Shader "PBR_GI"{
                 // 镜面反射率
                 // - 纯金属只有镜面反射，所以金属度代表了镜面反射程度
                 // - unity_ColorSpaceDielectricSpec.a 非金属材质的反射率（默认是 0.04）
-                half3 specColor = lerp(unity_ColorSpaceDielectricSpec.rgb, albedo, metallic);
+                half3 specColor = lerp(unity_ColorSpaceDielectricSpec.rgb, albedo, metallic);       // 镜面反射颜色
                 half oneMinusReflectivity = (1 - metallic) * unity_ColorSpaceDielectricSpec.a;
                 // 漫反射率
-                half3 diffColor = albedo * oneMinusReflectivity;
+                half3 diffColor = albedo * oneMinusReflectivity;                                   // 漫反射颜色    
                 
             // 【间接光】
                 // - 间接漫反射：SH球谐光照 or 光照贴图 or 实时光照贴图
                 // - 间接镜面反射：采样反射探针cubemao（低mipLevel）
-                half3 indirectDiffuse = ComputeIndirectDiffuse(i.ambientOrLightmapUV, occlusion);   
-                half3 indirectSpecular = ComputeIndirectSpecular(refDir, worldPos, roughness, occlusion);
+                half3 indirectDiffuse = IndirectDiffuse(i.ambientOrLightmapUV, occlusion);   
+                half3 indirectSpecular = IndirectSpecular(refDir, worldPos, roughness, occlusion);
                 // 计算掠射角时反射率（近似菲涅尔）
                 half grazingTerm= saturate((1 - roughness) + (1 - oneMinusReflectivity));
                 // 间接光镜面反射
@@ -321,15 +320,15 @@ Shader "PBR_GI"{
             // 【BRDF】直射光
 
                 // BRDF 高光反射项
-                // half G = SchlickGGX_UE4 (nl, nv, roughness);              // G几何遮蔽函数：（Unity）
-                half G = SchlickGGX_Unity5(nl,nv,roughness);           
+                half G = SchlickGGX_UE4 (nl, nv, roughness);              // G几何遮蔽函数：（Unity）
+                // half G = SchlickGGX_Unity5(nl,nv,roughness);           
                 half D = GGXTerm(nh, roughness);                          // D法线分布函数
                 half3 F = SchlickFresnel(specColor, lh);                     // F菲涅尔
                 half3 specularTerm = G * D * F / (4.0 * max(nv * nl, 0.001)); 
 
                 // BRDF 漫反射项
-                // half3 diffuseTerm = BurleyDiffuseTerm(nv, nl, lh, roughness, diffColor);
-                half3 diffuseTerm = LambertDiffuseTerm(diffColor);
+                half3 diffuseTerm = BurleyDiffuseTerm(nv, nl, lh, roughness, diffColor);
+                // half3 diffuseTerm = LambertDiffuseTerm(diffColor);
 
                 // 【反射方程】
                 half3 L_o = UNITY_PI * (diffuseTerm + specularTerm) * _LightColor0.rgb * nl;
@@ -338,8 +337,8 @@ Shader "PBR_GI"{
                 float3 ambient = UNITY_LIGHTMODEL_AMBIENT.rgb * albedo;
 
                 // 最终颜色
-                half3 color = L_o * atten + ambient+ emission;
-                // half3 color = L_o * atten + indirectDiffuse + indirectSpecular + emission;
+                // half3 color = L_o * atten + ambient+ emission;
+                half3 color = L_o * atten + indirectDiffuse + indirectSpecular + emission;
                
                 //雾效(UnityCG.cginc)
 				UNITY_APPLY_FOG(i.fogCoord, color.rgb);
